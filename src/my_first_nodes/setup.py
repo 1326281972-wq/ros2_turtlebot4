@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
         'my_talker = my_first_nodes.my_talker:main',
         'my_listener = my_first_nodes.my_listener:main',
+        'draw_square = my_first_nodes.draw_square:main',
         ],
     },
 )

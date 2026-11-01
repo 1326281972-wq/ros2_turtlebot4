@@ -19,9 +19,9 @@ setup(
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='lud',
-    maintainer_email='lud@todo.todo',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    maintainer_email='1326281972@qq.com',
+    description='My ROS2 learning nodes: talker/listener, draw_square, add_server, turtle_to_point',
+    license='Apache-2.0',
     extras_require={
         'test': [
             'pytest',
@@ -29,11 +29,11 @@ setup(
     },
     entry_points={
         'console_scripts': [
-        'my_talker = my_first_nodes.my_talker:main',
-        'my_listener = my_first_nodes.my_listener:main',
-        'draw_square = my_first_nodes.draw_square:main',
-        'add_server = my_first_nodes.add_server:main',
-        'turtle_to_point = my_first_nodes.turtle_to_point:main',
+            'my_talker = my_first_nodes.my_talker:main',
+            'my_listener = my_first_nodes.my_listener:main',
+            'draw_square = my_first_nodes.draw_square:main',
+            'add_server = my_first_nodes.add_server:main',
+            'turtle_to_point = my_first_nodes.turtle_to_point:main',
         ],
     },
 )

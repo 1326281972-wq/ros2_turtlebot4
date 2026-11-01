@@ -5,6 +5,7 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import Twist
 from turtlesim.msg import Pose
+from rcl_interfaces.msg import SetParametersResult
 
 
 class DrawSquare(Node):
@@ -12,11 +13,20 @@ class DrawSquare(Node):
     def __init__(self):
         super().__init__('draw_square')
 
-        self.side_length = 2.0      # 边长（米）
-        self.linear_speed = 1.0     # 前进速度 m/s
-        self.angular_speed = 0.5    # 转向速度 rad/s
-        self.dist_tol = 0.02        # 到位判定：距离容差
-        self.angle_tol = 0.03       # 到位判定：角度容差（弧度）
+        self.declare_parameter('side_length', 2.0)
+        self.declare_parameter('linear_speed', 1.0)
+        self.declare_parameter('angular_speed', 0.5)
+        self.declare_parameter('dist_tol', 0.02)
+        self.declare_parameter('angle_tol', 0.03)
+
+        self.side_length = self.get_parameter('side_length').value
+        self.linear_speed = self.get_parameter('linear_speed').value
+        self.angular_speed = self.get_parameter('angular_speed').value
+        self.dist_tol = self.get_parameter('dist_tol').value
+        self.angle_tol = self.get_parameter('angle_tol').value
+
+        # 参数被外部修改时自动触发
+        self.add_on_set_parameters_callback(self.parameter_callback)
 
         self.pose = None            # 还没有收到任何位置数据
 
@@ -32,6 +42,21 @@ class DrawSquare(Node):
         self.edges_done = 0
 
         self.get_logger().info('draw_square 已启动，等待 /turtle1/pose ...')
+
+    def parameter_callback(self, params):
+        for p in params:
+            self.get_logger().info('参数 %s 被改为 %s' % (p.name, p.value))
+            if p.name == 'side_length':
+                self.side_length = p.value
+            elif p.name == 'linear_speed':
+                self.linear_speed = p.value
+            elif p.name == 'angular_speed':
+                self.angular_speed = p.value
+            elif p.name == 'dist_tol':
+                self.dist_tol = p.value
+            elif p.name == 'angle_tol':
+                self.angle_tol = p.value
+        return SetParametersResult(successful=True)
 
     def pose_callback(self, msg):
         self.pose = msg

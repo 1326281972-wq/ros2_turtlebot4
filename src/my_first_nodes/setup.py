@@ -1,3 +1,6 @@
+import os
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'my_first_nodes'
@@ -10,6 +13,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'),
+            glob(os.path.join('launch', '*.launch.py'))),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -27,6 +32,7 @@ setup(
         'my_talker = my_first_nodes.my_talker:main',
         'my_listener = my_first_nodes.my_listener:main',
         'draw_square = my_first_nodes.draw_square:main',
+        'add_server = my_first_nodes.add_server:main',
         ],
     },
 )

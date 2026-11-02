@@ -34,6 +34,7 @@ setup(
             'draw_square = my_first_nodes.draw_square:main',
             'add_server = my_first_nodes.add_server:main',
             'turtle_to_point = my_first_nodes.turtle_to_point:main',
+            'safety_stop = my_first_nodes.safety_stop:main',
         ],
     },
 )

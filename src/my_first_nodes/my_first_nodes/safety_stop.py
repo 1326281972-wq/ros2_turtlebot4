@@ -96,6 +96,7 @@ class SafetyStop(Node):
         self.last_scan_time = self.get_clock().now().nanoseconds / 1e9
 
         min_dist = float('inf')
+        any_valid = False           # 整帧里是否有过任何有效点（任意方向）
         for i, r in enumerate(msg.ranges):
             if r is None:
                 continue
@@ -105,6 +106,7 @@ class SafetyStop(Node):
                 continue
             if r > msg.range_max:
                 continue
+            any_valid = True
             # ★ 近距盲区修复：比 range_min 还近 → 按 range_min 计入（不能丢！）
             r_eff = max(r, msg.range_min)
 
@@ -113,10 +115,14 @@ class SafetyStop(Node):
             if abs(angle) <= FRONT_HALF_ANGLE:
                 min_dist = min(min_dist, r_eff)
 
-        # ★ 空帧保护：无有效点时保留上一帧距离，绝不改成 inf
         if math.isinf(min_dist):
-            if math.isinf(self.min_distance):
+            if any_valid:
+                # ★ v3.3 修复：扇区空但其他方向有数据 → 前方确实空旷，立刻恢复
+                # （v3.2 的错误：保留上一帧的旧距离 → 转弯后永远被限速）
                 self.min_distance = msg.range_max
+            else:
+                # 整帧一个有效点都没有 → 雷达疑似异常，保守保留上次值
+                pass
         else:
             self.min_distance = min_dist
 

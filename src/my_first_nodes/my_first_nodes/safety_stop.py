@@ -1,41 +1,33 @@
 #!/usr/bin/env python3
 """
-避障保护节点 v3 —— 碰撞预测 + 速度限幅（入门任务 1 交付核心）
-=============================================================
-作用：位于遥控器和底盘之间的"安全中间层"
+避障保护节点 v3.1 —— 碰撞预测 + 速度限幅 + Fail-Safe（入门任务 1 交付核心）
+=========================================================================
   遥控器 ──>/teleop_cmd_vel──> 【本节点】 ──>/cmd_vel──> 底盘
                                    ↑
                                  /scan（雷达）
 
-设计理念的演进（v1 → v3）
-------------------------
-v1（状态封锁）：前方 < 0.3 m 就把所有指令清零。
-    缺陷：狭小空间里前进被彻底禁死，必须人工把车拉出来；临界距离还来回抖动。
-v2（迟滞 + 放行）：加迟滞(0.3进/0.4出)，被挡时放行倒车和转向。
-    缺陷：仍然是"一刀切"——只要进了包围圈，前进速度直接归零，不能缓慢蹭。
-v3（碰撞预测 + 限幅，本版本）：不禁止任何按键，只在"会撞上"时压缩速度。
+v3.1 相对 v3 修复的三个致命问题（都是真机实测撞墙后定位的）
+----------------------------------------------------------
+【致命 BUG】近距盲区：RPLIDAR 的 range_min = 0.15 m，v3 把所有 r < range_min 的点
+    当作"无效"丢弃。当车蹭到 0.15 m 以内时，前方所有点都变无效 → 最小距离变成 inf
+    → 允许速度变成无穷大 → 全速撞上去。
+    修复：0 < r < range_min 时按 range_min 计入（"贴脸"仍算有障碍）。
 
-    ★ 核心公式（每 50 ms 计算一次）：
-        允许最大前进速度 = (前方距离 − 安全余量) / 反应时间
-        实际输出速度     = min(遥控期望速度, 允许最大前进速度)
+【Fail-Safe 1】雷达数据超时：超过 SCAN_TIMEOUT 秒没收到 /scan（雷达掉线、话题中断），
+    一律把允许速度压到 0 —— 安全系统必须在"看不见"时选择停车，而不是全速。
 
-    物理含义：把"安全"表达为速度约束而不是开关。
-    - 距离 0.50 m → 允许 ≈ 0.57 m/s
-    - 距离 0.30 m → 允许 ≈ 0.29 m/s
-    - 距离 0.20 m → 允许 ≈ 0.14 m/s   （越近越慢，永远撞不上）
-    - 距离 < 0.12 m → 紧急停车（真兜底）
+【Fail-Safe 2】空帧保护：整帧没有任何有效点（如全被遮挡/超量程）时，
+    保留上一帧的距离，不把距离放大成 inf。
 
-    ★ 三条永远放行：
-      1. 转向 angular.z  —— 狭小空间靠转向脱困
-      2. 倒车 linear.x<0 —— 后退永远安全
-      3. 零速           —— 本来就不动
+物理常识（真机必知，答辩加分）
+--------------------------
+- 2D 雷达只扫一层水平面：低矮物体（< 雷达高度）、黑色吸光、玻璃/镜面 都可能"看不见"，
+  这类场景只能靠底盘自带 bump/cliff 传感器兜底，不是软件能解决的。
+- /scan 实测 2 Hz → 反应时间必须 ≥ 0.5 s，否则限速公式给的允许速度偏大。
 
 关键知识点：
-  - 雷达是传感器数据，必须用 best_effort QoS(qos_profile_sensor_data)，
-    用默认 reliable 订阅会一条数据都收不到（已实测验证）
-  - 距离里要过滤 inf / nan（超量程和无效点）
-  - /scan 实测只有 2 Hz（0.5 s 一帧）→ 反应时间必须 ≥ 0.5 s，否则算出来的允许速度
-    会偏大，冲过头就会撞上
+  - 传感器数据必须 best_effort QoS(qos_profile_sensor_data)，默认 reliable 收不到
+  - 距离要过滤 inf / nan，但**不能**把"太近"当成"没有"
 """
 
 import math
@@ -47,91 +39,104 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 
 
-# ===== 可调参数（改这里就能调手感）=====
-HARD_STOP_DISTANCE = 0.12    # 紧急停车距离（米）——真兜底，小于它才真的不动
-SAFETY_MARGIN = 0.10         # 安全余量（米）——车身雷达安装位置到车头边缘的距离
+# ===== 可调参数 =====
+HARD_STOP_DISTANCE = 0.12    # 紧急停车距离（米）
+SAFETY_MARGIN = 0.10         # 安全余量（米）：雷达安装点到车头前缘
 REACTION_TIME = 0.70         # 反应时间（秒）= 雷达周期 0.5 + 通信制动 0.2
-FRONT_HALF_ANGLE = math.pi / 3   # 前方扇区半角：±60°
-PUBLISH_RATE = 20.0          # 控制频率（Hz）——必须远高于雷达 2 Hz，才能及时限幅
-LOG_PERIOD = 1.0             # 限速日志打印间隔（秒），避免刷屏
+SCAN_TIMEOUT = 1.5           # 雷达数据超时（秒）→ 触发 fail-safe 停车
+FRONT_HALF_ANGLE = math.pi / 3   # 前方扇区半角 ±60°
+PUBLISH_RATE = 20.0          # 控制频率（Hz）
+LOG_PERIOD = 1.0             # 日志限频（秒）
 
 
 class SafetyStop(Node):
     def __init__(self):
         super().__init__('safety_stop')
 
-        # ① 订阅雷达：必须用传感器 QoS（best_effort）
         self.sub_scan = self.create_subscription(
             LaserScan, '/scan', self.scan_callback, qos_profile_sensor_data)
-
-        # ② 订阅遥控器（已改道到 /teleop_cmd_vel）
         self.sub_cmd = self.create_subscription(
             Twist, '/teleop_cmd_vel', self.cmd_callback, 10)
-
-        # ③ 发布底盘指令
         self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        self.min_distance = float('inf')   # 前方扇区最近障碍
-        self.last_cmd = Twist()            # 遥控最新指令
+        self.min_distance = float('inf')
+        self.range_min = 0.15          # 收到第一帧后由 msg.range_min 更新
+        self.last_scan_time = None     # 最近一次收到 scan 的时刻（秒）
+        self.last_cmd = Twist()
         self.last_log_time = 0.0
-        self.stopped = False               # 是否处于紧急停车
 
-        # ④ 高频定时器：限幅必须比雷达快，才能在雷达两帧之间"持续压制"速度
         self.timer = self.create_timer(1.0 / PUBLISH_RATE, self.timer_callback)
 
         self.get_logger().info(
-            f'避障 v3 启动（碰撞预测+限幅）：急停<{HARD_STOP_DISTANCE}m，'
-            f'余量 {SAFETY_MARGIN}m，反应时间 {REACTION_TIME}s，'
-            f'扇区 ±{int(math.degrees(FRONT_HALF_ANGLE))}°，控制频率 {PUBLISH_RATE:.0f}Hz')
+            f'避障 v3.1 启动：急停<{HARD_STOP_DISTANCE}m 余量{SAFETY_MARGIN}m '
+            f'反应{REACTION_TIME}s 数据超时{SCAN_TIMEOUT}s '
+            f'扇区±{int(math.degrees(FRONT_HALF_ANGLE))}°')
 
     # ---------------- 回调 ----------------
     def cmd_callback(self, msg: Twist):
         self.last_cmd = msg
 
     def scan_callback(self, msg: LaserScan):
-        """统计前方扇区的最近有效距离"""
+        self.range_min = msg.range_min
+        self.last_scan_time = self.get_clock().now().nanoseconds / 1e9
+
         min_dist = float('inf')
         for i, r in enumerate(msg.ranges):
             if r is None:
                 continue
             if math.isinf(r) or math.isnan(r):        # 超量程/测量失败
                 continue
-            if r < msg.range_min or r > msg.range_max:
+            if r <= 0.0:                              # 无效
+                continue
+            # ★ 关键修复：比 range_min 还近 → 说明"贴脸"，按 range_min 计入（不能丢弃！）
+            r_eff = max(r, msg.range_min)
+            if r > msg.range_max:
                 continue
             angle = msg.angle_min + i * msg.angle_increment
-            angle = math.atan2(math.sin(angle), math.cos(angle))   # 归一到 [-pi, pi]
+            angle = math.atan2(math.sin(angle), math.cos(angle))
             if abs(angle) <= FRONT_HALF_ANGLE:
-                min_dist = min(min_dist, r)
+                min_dist = min(min_dist, r_eff)
 
-        # 距离只增不减地"平滑"一帧，避免单点噪声导致速度忽高忽低
-        self.min_distance = min_dist
+        # ★ Fail-Safe 2：整帧无有效点 → 保留上一帧距离，绝不放大成 inf
+        if math.isinf(min_dist):
+            if math.isinf(self.min_distance):
+                # 从未测到过任何东西，用超量程值代替（相当于"前方空旷"）
+                self.min_distance = msg.range_max
+        else:
+            self.min_distance = min_dist
+
+        self.get_logger().info(
+            f'雷达帧：前方最近 {self.min_distance:.3f} m（有效点中最近角度已过滤）')
 
     # ---------------- 核心逻辑 ----------------
     def allowed_linear_speed(self, distance: float) -> float:
-        """由距离反推允许的最大前进速度（安全包络）"""
         if distance < HARD_STOP_DISTANCE:
             return 0.0
         return max(0.0, (distance - SAFETY_MARGIN) / REACTION_TIME)
 
     def timer_callback(self):
         out = Twist()
-
-        # ★ 转向永远放行（狭小空间靠它脱困）
-        out.angular = self.last_cmd.angular
+        out.angular = self.last_cmd.angular          # ★ 转向永远放行
+        out.linear.y = self.last_cmd.linear.y
 
         v_want = self.last_cmd.linear.x
+        now = self.get_clock().now().nanoseconds / 1e9
+
+        # ★ Fail-Safe 1：雷达数据超时 → 禁止前进
+        scan_stale = (self.last_scan_time is None
+                      or (now - self.last_scan_time) > SCAN_TIMEOUT)
 
         if v_want <= 0.0:
-            # ★ 倒车/零速永远放行（后退不会撞前方障碍）
-            out.linear.x = v_want
-            out.linear.y = self.last_cmd.linear.y
+            out.linear.x = v_want                    # 倒车/零速永远放行
+        elif scan_stale:
+            out.linear.x = 0.0
+            if now - self.last_log_time > LOG_PERIOD:
+                self.last_log_time = now
+                self.get_logger().error(
+                    f'❌ 雷达数据超时（>{SCAN_TIMEOUT}s 未收到 /scan）→ 禁止前进')
         else:
             v_allow = self.allowed_linear_speed(self.min_distance)
             out.linear.x = min(v_want, v_allow)
-            out.linear.y = self.last_cmd.linear.y
-
-            # 日志：只在"被限幅"或"急停"时打印，且限频
-            now = self.get_clock().now().nanoseconds / 1e9
             if out.linear.x < v_want - 1e-3 and now - self.last_log_time > LOG_PERIOD:
                 self.last_log_time = now
                 if v_allow <= 0.0:
@@ -140,7 +145,7 @@ class SafetyStop(Node):
                 else:
                     self.get_logger().warn(
                         f'减速保护：前方 {self.min_distance:.3f} m → '
-                        f'速度 {v_want:.2f} 限到 {out.linear.x:.2f} m/s（转向不受限）')
+                        f'{v_want:.2f} 限到 {out.linear.x:.2f} m/s')
 
         self.pub_cmd.publish(out)
 
